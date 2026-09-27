@@ -15,6 +15,7 @@ import {
 import {
   GAME_TITLE, GAME_SUBTITLE, VERSION, WEAPONS, WEAPON_ORDER, SPECIALS, SUB, MAPS, DIFFICULTY, MATCH, QUALITY,
   DEFAULT_SETTINGS, TEAM_PALETTES, COLORBLIND_PALETTE, PROGRESSION, BOT_NAMES, TEAM_NAMES,
+  mapNoBots, mapBossOk, bossFallbackMap, noBotsStartBlock,
 } from '../config.js';
 import * as LOOK from '../game/character-style.js';
 import { G } from '../core/ctx.js';
@@ -23,6 +24,7 @@ import {
   sweepEdge, sweepClip, splatClip, splatCover, skinSwatch, irisSwatch, outfitIcon, tagArt, inkBand, dripsSVG, computeBossAwards,
 } from './menu-art.js';
 import { bossSilhouette, bossEmblem, BOSS_GLYPH, BOSS_NAME, BOSS_EPITHET } from './boss-art.js';
+import { WhatsNew } from './news.js';
 
 const SCREENS = ['loading', 'title', 'main', 'mode', 'loadout', 'setup', 'locker', 'settings', 'howto', 'credits', 'pause', 'results', 'online', 'lobby'];
 // Transitions that get the full-screen ink wipe (the rest use staggered pop-ins).
@@ -192,6 +194,7 @@ export class Menus {
     this._loop = this._loop.bind(this);
     this._raf = requestAnimationFrame(this._loop);
     if (NETMOCK) import('../net/mock.js').then((m) => { this._mockMod = m; }, (e) => console.error('[menus] netmock', e));
+    this._news = new WhatsNew(this);   // "What's New" launch cards (src/ui/news.js): once per update, on the first main menu
   }
 
   // ================================================================ public API
@@ -467,6 +470,7 @@ export class Menus {
     if (!f) f = scr.el.querySelector('[data-nav]');
     if (f) this._setFocus(f, { snap: true });
     if (scr.afterMount) scr.afterMount();
+    if (name === 'main') this._news.maybeShow();
   }
 
   /** mode: 'full' (organic ink pour; mid ≈ 380 ms, clear ≈ 1000 ms) · 'light' (quick swipe) · reduced motion → 'fade'. */
@@ -479,7 +483,7 @@ export class Menus {
   _go(name, opts = {}) { this.show(name, { ...opts, push: true }); }
 
   _back() {
-    if (this._modal) { this._closeModal(); return; }
+    if (this._modal) { if (this._modal._onBack) this._modal._onBack(); else this._closeModal(); return; }
     if (performance.now() - this._shownAt < 200) return; // swallow the key that opened this screen
     const s = this._scr;
     if (s && s.onBack) { s.onBack(); return; }
@@ -886,7 +890,7 @@ export class Menus {
       { id: 'turf', name: 'TURF WAR', kicker: 'CLASSIC', img: stageArt('tidewater', 'day'),
         blurb: 'Two teams of four, one harbour. Ink the most ground before the whistle.',
         chips: [[GLYPHS.users, '4 V 4'], [GLYPHS.clock, durLabel(s.matchLength || MATCH.defaultDuration || 180)], [GLYPHS.bot, 'VS BOTS']] },
-      { id: 'boss', name: 'BOSS BATTLE', kicker: 'CO-OP', img: stageArt('kelpline', 'dusk'), badge: 'NEW!',
+      { id: 'boss', name: 'BOSS BATTLE', kicker: 'CO-OP', img: stageArt('kelpline', 'dusk'), badge: 'NEW!', beta: true,
         blurb: `Everyone's one squad against ${BOSS_NAME}, a giant crab in a rusted container. Sink it before time runs out!`,
         chips: [[GLYPHS.users, 'SQUAD OF 8'], [GLYPHS.clock, durLabel(bossLen)], [BOSS_GLYPH, '1 BOSS']] },
     ];
@@ -915,6 +919,7 @@ export class Menus {
           h('span', { class: 'iw-mode__splat', html: splatSVG({ seed: 51 + i * 9, fill: 'var(--mc)', r: 58, arms: 9, drops: 5 }) }),
           hero, h('i', { class: 'iw-mode__glare' })),
         h('span', { class: 'iw-mode__kicker' }, m.kicker),
+        m.beta ? h('span', { class: 'iw-beta iw-mode__beta' }, 'PUBLIC BETA') : null,
         h('span', { class: 'iw-mode__tape' }, h('span', { class: 'iw-display' }, m.name)),
         h('span', { class: 'iw-mode__blurb' }, m.blurb),
         h('span', { class: 'iw-mode__chips' }, m.chips.map(([ic, t]) => h('span', { class: 'iw-chip' }, h('i', { html: ic }), t))),
@@ -979,7 +984,7 @@ export class Menus {
 
   _scr_setup() {
     const s = this._settings();
-    const maps = this._maps();
+    const maps = this._maps().filter((m) => !m.onlineOnly);   // (online-only stages live in the online lobby's picker)
     const diffs = this._diffs();
     const byId = (id) => maps.find((m) => m.id === id);
     const st = this._setup || (this._setup = { times: {} });
@@ -2653,6 +2658,9 @@ export class Menus {
       return r;
     };
     const rStage = srow('stage', GLYPHS.map, 'STAGE', stage);
+    // stage rules sticker (config onlineOnly / noBots — Cargo Terminal), slapped across the ticket's top edge
+    const stRules = h('span', { class: 'iw-lstage__rules' }, h('i', { html: GLYPHS.users }), h('b'));
+    rStage.querySelector('.iw-lset__label').appendChild(stRules);
     const rTime = srow('time', GLYPHS.sun, 'TIME', timeSeg.el);
     const rLen = srow('len', GLYPHS.clock, 'LENGTH', lenSeg.el);
     const rPair = h('div', { class: 'iw-lset__pair' }, rTime, rLen);
@@ -2673,7 +2681,8 @@ export class Menus {
     const modeArrows = h('span', { class: 'iw-lob__modearrows' }, h('i', { class: 'is-l', html: GLYPHS.back }), h('i', { class: 'is-r', html: GLYPHS.next }));
     const rMode = h('div', { class: 'iw-lset iw-lset--mode' },
       h('small', { class: 'iw-lob__modelbl' }, 'MODE'),
-      h('span', { class: 'iw-lob__mode' }, h('i', { html: splatSVG({ seed: 12, cls: 'iw-fa', r: 56, arms: 8, drops: 3 }) }, modeIco), modeName, modeArrows));
+      h('span', { class: 'iw-lob__mode' }, h('i', { html: splatSVG({ seed: 12, cls: 'iw-fa', r: 56, arms: 8, drops: 3 }) }, modeIco), modeName, modeArrows),
+      h('span', { class: 'iw-beta iw-beta--sm iw-lob__beta' }, 'PUBLIC BETA'));
     rMode._id = 'mode';
     modeArrows.children[0].addEventListener('click', (e) => { e.stopPropagation(); this._setFocus(rMode); setMode(-1); });
     modeArrows.children[1].addEventListener('click', (e) => { e.stopPropagation(); this._setFocus(rMode); setMode(1); });
@@ -2743,11 +2752,14 @@ export class Menus {
       if (o.map) this._setSetting('lastStage', o.map);
       if (o.time) this._setSetting('stageTimes', { ...(this._settings().stageTimes || {}), [lob.map]: o.time });
     };
+    // the stages this room's mode can use: Boss Battle never lists a noBoss stage
+    const stageList = () => (bossMode() ? maps.filter((m) => mapBossOk(m.id)) : maps);
     const setMap = (d) => {
       if (!isHost()) { this._bump(stage, 'left'); this._sfx('ui_error', 0.15); return; }
-      const i = maps.findIndex((m) => m.id === lob.map);
-      const n = maps[(i + d + maps.length) % maps.length];
-      lob = { ...lob, map: n.id };
+      const list = stageList();
+      const i = list.findIndex((m) => m.id === lob.map);
+      const n = list[(i + d + list.length) % list.length];
+      lob = { ...lob, map: n.id, bots: mapNoBots(n.id) ? false : lob.bots };
       renderStage(d);
       this._sfx('ui_toggle'); this._sfx('splat_small', 0.06);
       hostSet({ map: n.id });
@@ -2757,15 +2769,22 @@ export class Menus {
       const next = bossMode() ? 'turf' : 'boss';
       // keep the length sensible for the mode (boss fights run 3–5 min, 4 by default)
       const dur = next === 'boss' ? 240 : (durations.includes(lob.duration) ? lob.duration : (MATCH.defaultDuration || 180));
-      lob = { ...lob, mode: next, duration: dur };
+      // a stage with no Boss Battle (Cargo Terminal) hands the room to a boss-eligible one (the session does the same)
+      const was = maps.find((m) => m.id === lob.map);
+      const map = next === 'boss' && !mapBossOk(lob.map) ? bossFallbackMap(lob.map) : lob.map;
+      lob = { ...lob, mode: next, duration: dur, map };
       this._sfx('ui_toggle'); this._sfx(next === 'boss' ? 'splat_big' : 'splat_small', 0.06);
       restartAnim(rMode, 'is-hit');
       render(false);
-      hostSet({ mode: next, duration: dur });
+      hostSet(map !== (was && was.id) ? { mode: next, duration: dur, map } : { mode: next, duration: dur });
+      if (map !== (was && was.id)) { const n = maps.find((m) => m.id === map); this.toast(`${was ? was.name : 'That stage'} has no Boss Battle — switched to ${n ? n.name : 'another stage'}`, { icon: GLYPHS.map }); }
     };
     let shownMap = null, shownTime = null;
     const renderStage = (dir = 0) => {
       const m = maps.find((x) => x.id === lob.map) || maps[0], time = lob.time === 'dusk' ? 'dusk' : 'day';
+      // (the count follows the mode's stage list, so it refreshes on a mode switch too)
+      const list = stageList(), k = list.indexOf(m);
+      stNum.innerHTML = `STAGE <b>${String((k < 0 ? maps.indexOf(m) : k) + 1).padStart(2, '0')}</b><em>/ ${String(list.length).padStart(2, '0')}</em>`;
       if (m.id === shownMap && time === shownTime) return;
       const first = shownMap === null;
       shownMap = m.id; shownTime = time;
@@ -2777,8 +2796,10 @@ export class Menus {
       stImgs.appendChild(img);
       setTimeout(() => olds.forEach((o) => o.remove()), first ? 0 : 520);
       stName.textContent = m.name;
-      stNum.innerHTML = `STAGE <b>${String(maps.indexOf(m) + 1).padStart(2, '0')}</b><em>/ ${String(maps.length).padStart(2, '0')}</em>`;
       stage.dataset.time = time;
+      const rules = [m.onlineOnly ? 'ONLINE ONLY' : '', m.noBots ? 'NO BOTS' : ''].filter(Boolean).join(' · ');
+      stRules.lastChild.textContent = rules;
+      rStage.classList.toggle('has-rules', !!rules);
       if (!first) { restartAnim(stage, 'is-hit'); restartAnim(stName, 'is-in'); }
     };
     const flash = (row) => { if (!isHost()) restartAnim(row, 'is-flash'); };
@@ -2845,7 +2866,8 @@ export class Menus {
       if (!net.canStart()) {
         this._sfx('ui_error'); restartAnim(startBtn, 'is-shake');
         const waiting = players().filter((p) => !p.you && !p.ready && !p.host);
-        this.toast(waiting.length ? `Waiting for ${listNames(waiting)} to ready up` : 'Not ready to start yet', { kind: 'info', icon: GLYPHS.clock });
+        const block = net.startBlock ? net.startBlock() : null;
+        this.toast(block || (waiting.length ? `Waiting for ${listNames(waiting)} to ready up` : 'Not ready to start yet'), { kind: 'info', icon: block ? GLYPHS.users : GLYPHS.clock });
         return;
       }
       this._sfx('ui_confirm'); this._sfx('splat_big', 0.1);
@@ -2973,11 +2995,15 @@ export class Menus {
           else if (r === rTime) this._bind(r, { id: 'set-time', type: 'row', adjust: timeSeg.adjust, accept: timeSeg.cycle });
           else if (r === rPal) this._bind(r, { id: 'set-pal', type: 'row', adjust: palSeg.adjust, accept: palSeg.cycle });
           else if (r === rLen) this._bind(r, { id: 'set-len', type: 'row', adjust: lenSeg.adjust, accept: lenSeg.cycle });
-          else if (r === rBots) this._bind(r, { id: 'set-bots', type: 'row', adjust: botTgl.adjust, accept: botTgl.accept });
+          else if (r === rBots) this._bind(r, { id: 'set-bots', type: 'row', adjust: (d) => (botsLocked() ? lockedBots() : botTgl.adjust(d)), accept: () => (botsLocked() ? lockedBots() : botTgl.accept()) });
           else if (r === rDiff) this._bind(r, { id: 'set-diff', type: 'row', adjust: (d) => { if (lob.bots === false) { this._sfx('ui_error', 0.15); return; } diffSeg.adjust(d); }, accept: () => { if (lob.bots !== false) diffSeg.cycle(); } });
         } else if (!host && r.dataset.nav) { delete r.dataset.nav; if (this._focus === r) this._setFocus(wChip); }
       }
     };
+
+    // humans-only stage (config noBots): the bots switch is locked off
+    const botsLocked = () => mapNoBots(lob.map);
+    const lockedBots = () => { this._sfx('ui_error', 0.15); restartAnim(rBots, 'is-shake'); this.toast('No bots on this stage — it’s humans only', { icon: GLYPHS.bot }); };
 
     // ---- render from the lobby state
     const renderPlates = () => {
@@ -3095,7 +3121,8 @@ export class Menus {
       lenSeg.refresh(lob.duration);
       rDiff.classList.toggle('is-off', lob.bots === false);
       const humans = players().length;
-      botsNote.textContent = lob.bots !== false ? (humans < 8 ? `${8 - humans} bot${8 - humans === 1 ? '' : 's'} join ${bossMode() ? 'the squad' : 'in'}` : 'Room is full') : 'Empty spots stay empty';
+      botsNote.textContent = botsLocked() ? 'No bots on this stage' : lob.bots !== false ? (humans < 8 ? `${8 - humans} bot${8 - humans === 1 ? '' : 's'} join ${bossMode() ? 'the squad' : 'in'}` : 'Room is full') : 'Empty spots stay empty';
+      rBots.classList.toggle('is-locked', botsLocked());
       if (bossMode()) { const P1 = TEAM_PALETTES[palIdx()]; if (P1) palName.textContent = `${P1.names[0]} squad · ${P1.names[1]} boss`; }
       const host = players().find((p) => p.host);
       hostName.textContent = host ? host.name : 'the host';
@@ -3132,7 +3159,8 @@ export class Menus {
       startBtn.classList.toggle('is-blocked', host && !ok);
       const waiting = players().filter((p) => !p.you && !p.ready && !p.host);
       const humans = players().length;
-      startSub.textContent = ok ? (humans <= 1 && lob.bots !== false ? 'Just you and the bots' : humans <= 1 ? 'Nobody to play against yet!' : 'Everyone’s ready — let’s ink!') : waiting.length ? `Waiting for ${listNames(waiting)}` : 'Getting ready…';
+      const block = (net && net.startBlock ? net.startBlock() : noBotsStartBlock(lob)) || null;   // humans-only stage: 2+ players, one per side
+      startSub.textContent = ok ? (humans <= 1 && lob.bots !== false ? 'Just you and the bots' : humans <= 1 ? 'Nobody to play against yet!' : 'Everyone’s ready — let’s ink!') : block || (waiting.length ? `Waiting for ${listNames(waiting)}` : 'Getting ready…');
       // team seg follows your actual side unless a request is pending
       if (me && !S.pendingTeam) teamSeg.refresh(S.teamPref === 'auto' ? 'auto' : teamOf(me));
       teamRow.dataset.pick = S.teamPref === 'auto' ? 'auto' : String(S.pendingTeam ? S.pendingTeam.team : teamOf(me));
@@ -3594,7 +3622,8 @@ export class Menus {
     const head = h('div', { class: 'iw-res__head iw-in iw-in--pop' + (win ? ' is-win' : ' is-lose') },
       h('div', { class: 'iw-res__splat', html: splatSVG({ seed: win ? 9 : 14, cls: 'iw-fta', r: 60, arms: 10, drops: 4 }) }),
       titleEl,
-      h('div', { class: 'iw-res__metarow' }, h('div', { class: 'iw-res__meta' }, h('i', { html: GLYPHS.map }), `${d.mapName || (boss ? 'Boss Battle' : 'Turf War')} · ${boss ? 'Boss Battle' : 'Turf War'}`), tags),
+      h('div', { class: 'iw-res__metarow' }, h('div', { class: 'iw-res__meta' }, h('i', { html: GLYPHS.map }), `${d.mapName || (boss ? 'Boss Battle' : 'Turf War')} · ${boss ? 'Boss Battle' : 'Turf War'}`), tags,
+        boss ? h('span', { class: 'iw-beta iw-res__beta' }, 'PUBLIC BETA') : null),
       medalRow);
 
     // ---- coverage bar (JS-driven growth so the numbers + sound land together)

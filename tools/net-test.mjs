@@ -31,7 +31,7 @@ const Q = opt('quality', N > 2 ? 'low' : 'high');   // several full game instanc
 const W = N > 2 ? 640 : 960, H = N > 2 ? 360 : 540;
 
 const say = (...a) => console.log('[net-test]', ...a);
-// never hang a CI / agent shell: hard stop well past the longest possible run
+// never hang a CI shell: hard stop well past the longest possible run
 // (kills its browsers first: an exit that leaves headless Chrome running orphans GPU/renderer processes that keep
 // spinning their WebGL loops and starve every later run)
 const watchdog = setTimeout(() => {
@@ -110,7 +110,7 @@ try {
     };
     requestAnimationFrame(snap);
   })));
-  const tagRes = (i) => pages[i] ? ev(i, () => JSON.stringify({ state: __inkwave.match?.state, t: +(__inkwave.match?.time ?? 0).toFixed(1), fps: __inkwave.fps, host: __G.net.isHost })) : Promise.resolve('(gone)');
+  const tagRes = (i) => pages[i] ? ev(i, () => JSON.stringify({ state: __inkwave.match?.state, t: +(__inkwave.match?.time ?? 0).toFixed(1), fps: __inkwave.fps, host: __G.net.isHost, actors: __G.actors.length, teams: [0, 1].map((t) => __G.actors.filter((a) => a.team === t).length), bots: __G.actors.filter((a) => a.isBot).length })) : Promise.resolve('(gone)');
   let leftRec = null, leftAt = 0, leftIdx = -1;
   for (let s = 0; s < SECS; s += 6) {
     await new Promise((r) => setTimeout(r, Math.min(6, SECS - s) * 1000));

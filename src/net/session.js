@@ -5,7 +5,7 @@
 // sends one roster to everyone; every client builds the stage, reports ready, and the host says go — so intros start
 // together. In the match NetMatch (netmatch.js) does the replication.
 import { G, emit } from '../core/ctx.js';
-import { MAPS, WEAPONS, WEAPON_ORDER, MATCH, BOT_NAMES, TEAM_PALETTES } from '../config.js';
+import { MAPS, WEAPONS, WEAPON_ORDER, MATCH, BOT_NAMES, TEAM_PALETTES, mapNoBots, mapBossOk, bossFallbackMap, noBotsStartBlock } from '../config.js';
 import { randomStyle } from '../game/character-style.js';
 import { Transport } from './transport.js';
 import { NetMatch } from './netmatch.js';
@@ -28,6 +28,7 @@ export class NetSession {
     this.match = null;          // NetMatch while playing
     this._members = new Map();  // relay membership (id → name), authoritative for who is connected
     this._startCfg = null;
+    this._botsPref = null;      // host: the "fill with bots" choice, kept while a humans-only stage forces bots off
   }
 
   get isHost() { return !!this.myId && this.myId === this.hostId; }
@@ -54,7 +55,8 @@ export class NetSession {
     const g = G.game;
     // palette: the room's team colours (index into TEAM_PALETTES) — the host's current menu colours carry into the room
     // mode: 'turf' | 'boss' (Boss Battle: everyone is one squad vs HULLBREAKER — docs/BOSS.md)
-    return { map: g?.mapDef?.id || MAPS[0].id, time: g?.time || 'day', duration: g?.settings?.matchLength || MATCH.defaultDuration, bots: true, difficulty: g?.settings?.difficulty || 'normal', palette: g?.paletteIndex?.() ?? 0, mode: 'turf', players: [], maxPlayers: TEAM * 2 };
+    const map = g?.mapDef?.id || MAPS[0].id;
+    return { map, time: g?.time || 'day', duration: g?.settings?.matchLength || MATCH.defaultDuration, bots: !mapNoBots(map), difficulty: g?.settings?.difficulty || 'normal', palette: g?.paletteIndex?.() ?? 0, mode: 'turf', players: [], maxPlayers: TEAM * 2 };
   }
 
   _profile() {
@@ -95,6 +97,7 @@ export class NetSession {
     this._members.clear();
     for (const m of welcome.members) this._members.set(m.id, m.name);
     this.lobby = this._blankLobby();
+    this._botsPref = this.isHost ? true : null;   // a new room fills with bots unless its stage forbids them
     if (this.isHost) {
       this.lobby.players = [this._newPlayer(this.myId, name || me.name, { weapon: me.weapon, style: me.style })];
       this._fixTeams();
@@ -224,21 +227,28 @@ export class NetSession {
 
   setSettings(s = {}) {
     if (!this.isHost) return;
-    const l = this.lobby;
+    const l = this.lobby, wasMap = l.map;
     if (s.map && MAPS.some((m) => m.id === s.map)) l.map = s.map;
     if (s.time === 'day' || s.time === 'dusk') l.time = s.time;
     if (s.duration) l.duration = Math.max(60, Math.min(600, +s.duration | 0));
-    if (s.bots != null) l.bots = !!s.bots;
+    if (s.bots != null) this._botsPref = !!s.bots;
     if (s.difficulty && ['easy', 'normal', 'hard'].includes(s.difficulty)) l.difficulty = s.difficulty;
     if (Number.isInteger(s.palette) && s.palette >= 0 && s.palette < TEAM_PALETTES.length) l.palette = s.palette;
     if (s.mode === 'turf' || s.mode === 'boss') l.mode = s.mode;
+    // stage rules (config MAPS flags): a Boss Battle never runs on a noBoss stage — picking one in boss mode is refused,
+    // switching a room on one to boss mode moves it to a boss-eligible stage; a noBots stage forces bots off (the host's
+    // own choice comes back on the next stage)
+    if (l.mode === 'boss' && !mapBossOk(l.map)) l.map = bossFallbackMap(wasMap);
+    l.bots = mapNoBots(l.map) ? false : (this._botsPref ?? l.bots);
     this._broadcastLobby();
   }
 
   canStart() {
     if (!this.isHost || this.state !== 'lobby') return false;
-    return this.lobby.players.every((p) => p.ready || p.id === this.myId);
+    return !this.startBlock() && this.lobby.players.every((p) => p.ready || p.id === this.myId);
   }
+  // why the room can't start regardless of ready-ups (a humans-only stage without 2+ players, one per side), else null
+  startBlock() { return noBotsStartBlock(this.lobby); }
 
   emote(name) {
     if (!this.tr || !this.myId) return;
@@ -248,18 +258,19 @@ export class NetSession {
 
   // ------------------------------------------------------------------ match orchestration
   start() {
-    if (!this.isHost || this.state !== 'lobby' || !this.tr) return false;
+    if (!this.isHost || this.state !== 'lobby' || !this.tr || this.startBlock()) return false;
     const l = this.lobby;
+    const bots = l.bots && !mapNoBots(l.map);   // (a humans-only stage never gets bots, whatever the setting says)
     const roster = [];
     let nid = 0;
     const names = [...BOT_NAMES].sort(() => Math.random() - 0.5);
-    const boss = l.mode === 'boss';   // one squad of up to 8 (all team 0), bots fill the rest
+    const boss = l.mode === 'boss' && mapBossOk(l.map);   // one squad of up to 8 (all team 0), bots fill the rest
     for (let team = 0; team < (boss ? 1 : 2); team++) {
       const humans = boss ? l.players : l.players.filter((p) => p.team === team);
       const weapons = [...WEAPON_ORDER].sort(() => Math.random() - 0.5);
       let slot = 0;
       for (const p of humans) roster.push({ nid: nid++, owner: p.id, bot: false, team, slot: slot++, name: p.name, weapon: p.weapon, style: p.style });
-      if (l.bots) {
+      if (bots) {
         while (slot < (boss ? TEAM * 2 : TEAM)) {
           const used = new Set(roster.filter((r) => r.team === team).map((r) => r.weapon));
           const wpn = weapons.find((w) => !used.has(w)) || weapons[slot % weapons.length];
@@ -267,7 +278,7 @@ export class NetSession {
         }
       }
     }
-    const cfg = { k: 'start', roster, map: l.map, time: l.time, duration: l.duration, difficulty: l.difficulty, palette: l.palette, mode: l.mode === 'boss' ? 'boss' : 'turf', host: this.myId, id: Math.random().toString(36).slice(2, 8) };
+    const cfg = { k: 'start', roster, map: l.map, time: l.time, duration: l.duration, difficulty: l.difficulty, palette: l.palette, mode: boss ? 'boss' : 'turf', host: this.myId, id: Math.random().toString(36).slice(2, 8) };
     this.tr.lock(true);
     this.tr.broadcast(cfg);
     this._begin(cfg);

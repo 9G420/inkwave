@@ -658,7 +658,7 @@ export class PaintSystem {
   sample(faceId, u, v) {
     if (faceId < 0) return 0;
     const f = this.level.faces[faceId];
-    if (!f.atlas) return 0;
+    if (!f || !f.atlas) return 0;   // (a face id from a stage being swapped in under a still-running match)
     const i = Math.min(f.nu - 1, Math.max(0, Math.floor(u / f.cu)));
     const j = Math.min(f.nv - 1, Math.max(0, Math.floor(v / f.cv)));
     return this.grid[f.grid + j * f.nu + i];

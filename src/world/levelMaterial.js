@@ -1,6 +1,7 @@
 // Level surface material: MeshPhysicalMaterial + injected procedural surface patterns and the wet ink layer.
 import * as THREE from 'three';
 import { TEXLIB_GLSL } from './texlib.js';
+import { STAGE_SURFACES, FIRST_STAGE_SLOT, LAST_STAGE_SLOT } from './stages/surfaces.js';
 import { G } from '../core/ctx.js';
 import { inkUniforms, inkBeforeRender, INK_PARS, INK_COLOR, INK_ROUGH, INK_GEL, INK_SLOPE, INK_EMISSIVE, INK_LIGHTS, INK_LIGHT_MAPS, INK_SHADE } from './inkShading.js';
 
@@ -79,12 +80,15 @@ export function createLevelMaterial(paintTexture, atlasSize, muralTexture = null
       'asphalt', 'metalpanel', 'grate', 'brick', 'rubber', 'glasstile', 'pavers',
       /* 17 planks … 23 render (marina set) */ 'planks', 'hullpaint', 'nonslip', 'gelcoat', 'yard', 'weatherboard', 'render',
       /* 24 treads … 27 gangdeck (stairs + ramps) */ 'treads', 'stonestep', 'rampboard', 'gangdeck',
+      /* 28 … LAST_STAGE_SLOT: stage-owned surfaces (stages/<id>/surfaces.js), concrete where a slot is unused */
+      ...Array.from({ length: LAST_STAGE_SLOT - FIRST_STAGE_SLOT + 1 }, (_, k) => (STAGE_SURFACES.find((s) => s.slot === FIRST_STAGE_SLOT + k) || { name: 'concrete' }).name),
       /* TL_SIDE */ 'concrete'];
     const SIDE = map.length - 1;
     // ramp / asphalt / yard sides → concrete; car-deck edge → hull plating; stair / ramp sides → steel stringer plating,
     // rendered cheek wall, timber skirting, painted steel
     const onWall = { 4: SIDE, 10: SIDE, 21: SIDE, 19: 18, 24: 18, 25: 23, 26: 17, 27: 11 };
     const onTop = { 20: 17 };                                  // gelcoat hulls get a planked deck on top
+    for (const s of STAGE_SURFACES) { if (s.onWall != null) onWall[s.slot] = s.onWall; if (s.onTop != null) onTop[s.slot] = s.onTop; }
     uniforms.tAlbedo = { value: lib.albedo };
     uniforms.tNormal = { value: lib.normal };
     uniforms.tOrm = { value: lib.orm };

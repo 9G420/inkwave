@@ -5,7 +5,7 @@ import { Renderer } from './core/renderer.js';
 import { Input } from './core/input.js';
 import { mapTheme,
   DEFAULT_SETTINGS, QUALITY, TEAM_PALETTES, COLORBLIND_PALETTE, TEAM_NAMES, WEAPONS, WEAPON_ORDER, SUB, SPECIALS,
-  MAPS, DIFFICULTY, PLAYER, PROGRESSION, VERSION, MATCH,
+  MAPS, DIFFICULTY, PLAYER, PROGRESSION, VERSION, MATCH, OFFLINE_MAPS, mapOfflineOk, mapNoBots, mapBossOk,
 } from './config.js';
 import { Level } from './world/level.js';
 import { MAP_LAYOUTS } from './world/maps.js';
@@ -26,6 +26,9 @@ import { Showcase } from './game/showcase.js';
 import { BOSS_MODE } from './boss/bossMode.js';
 
 const params = new URLSearchParams(location.search);
+// dev-only: ?devstage lets an online-only stage (config onlineOnly — Cargo Terminal) boot as the backdrop and be walked
+// solo offline (never with bots); without it such a stage only ever loads for an online match
+const DEV_STAGE = params.has('devstage');
 const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r()));
 
 // ------------------------------------------------------------------------------------------ persistence
@@ -95,7 +98,8 @@ class Game {
     // world
     // (old ?map=sunset links = Tidewater at dusk)
     const pm = params.get('map') === 'sunset' ? 'tidewater' : params.get('map');
-    const map = MAPS.find((m) => m.id === pm) || MAPS[0];
+    let map = MAPS.find((m) => m.id === pm) || MAPS[0];
+    if (!mapOfflineOk(map.id) && !DEV_STAGE) { console.info(`[inkwave] ${map.name} is online only — booting ${OFFLINE_MAPS[0].name}`); map = OFFLINE_MAPS[0]; }
     this.time = params.get('time') === 'dusk' || params.get('map') === 'sunset' ? 'dusk' : (this.settings.timeOfDay === 'dusk' ? 'dusk' : 'day');
     this.theme = mapTheme(map, this.time);
     const q = QUALITY[this.settings.quality] || QUALITY.high;
@@ -210,6 +214,7 @@ class Game {
     const level = (G.level = new Level(MAP_LAYOUTS[layoutId], colliders));
     G.physics = new Physics(level);
     const lightmap = await this._loadLightmap(level, layoutId);
+    this.murals.userData.setStage?.(layoutId);   // the mural atlas's stage decals (ids 4…11) for this layout
     G.paint = new PaintSystem(G.renderer, level, { atlasSize: q.paintAtlas, maxDensity: q.paintAtlas >= 4096 ? 30 : 18 });
     this.levelMat = createLevelMaterial(G.paint.texture, G.paint.size, this.murals, { lightmap, texlib: this.texlib });
     (this.swimWake || (this.swimWake = new SwimWake())).reset();
@@ -249,9 +254,12 @@ class Game {
     }
   }
 
+  // deck slabs over the sea: axis-aligned boxes as {minX..maxZ}, boxes turned about Y (Cargo Terminal's berth) as oriented
+  // rects {cx, cz, hx, hz, ax, az} (environment.js orect); ramps and other tilted blocks never count
   _footprint(level) {
-    return level.blocks.filter((b) => b.aligned && b.aabbMax.y < 0.01 && b.aabbMax.y > -2.5 && b.aabbMin.y < -1)
-      .map((b) => ({ minX: b.aabbMin.x, maxX: b.aabbMax.x, minZ: b.aabbMin.z, maxZ: b.aabbMax.z }));
+    return level.blocks.filter((b) => (b.aligned || b.axes[1].y > 0.9999) && b.aabbMax.y < 0.01 && b.aabbMax.y > -2.5 && b.aabbMin.y < -1)
+      .map((b) => (b.aligned ? { minX: b.aabbMin.x, maxX: b.aabbMax.x, minZ: b.aabbMin.z, maxZ: b.aabbMax.z }
+        : { cx: b.center.x, cz: b.center.z, hx: b.half.x, hz: b.half.z, ax: b.axes[0].x, az: b.axes[0].z }));
   }
 
   _warmup() {
@@ -426,6 +434,8 @@ class Game {
       if (!actor || !this.match || this.match.attract || G.time - (formT.get(actor) ?? -9) < 0.2) return;
       if (actor.isLocal || actor._nearCamera?.()) G.audio?.play('swim_splash', { pos: actor.isLocal ? undefined : actor.pos, volume: (actor.isLocal ? 0.5 : 0.32) * Math.min(1, 0.55 + (speed || 0) / 16) });
     });
+    // online, humans-only stage: a player who left is gone from the match (Match.removeActor) — say so in the feed
+    on('actor:removed', ({ actor }) => { if (this.match && !this.match.attract) this.hud?.feed({ text: `${actor.name} left the match`, color: G.teamHex[actor.team], kind: 'info' }); });
     on('splatted', ({ victim, attacker, cause }) => {
       if (!this.match || this.match.attract) return;
       const local = this.match.local;
@@ -495,7 +505,10 @@ class Game {
     if (this.match) this.match.dispose();
     this.rig.dioFlip = false;
     G.projectiles.clear(); G.fx.clear?.(); G.paint.clear();
-    const m = (this.match = G.match = new Match({ attract: true, duration: 99999, difficulty: 'normal', CharacterClass: this.CharacterClass, rig: this.rig, input: this.input }));
+    // (a humans-only stage — after an online match there — idles with nobody on it; ?devstage stands idle kids there
+    // for the render audits)
+    const m = (this.match = G.match = new Match({ attract: true, duration: 99999, difficulty: 'normal', CharacterClass: this.CharacterClass, rig: this.rig, input: this.input,
+      noBots: mapNoBots(this.mapDef?.id), mannequins: DEV_STAGE }));
     m.setup(); m.start();
     for (const a of m.actors) { a.respawnTimer = 0; }
     this.attractT = 0; this.shotT = 0; this.shotIdx = 0;
@@ -557,7 +570,14 @@ class Game {
     this.showcase.hide();
     if (this.match) this.match.dispose();
     G.projectiles.clear(); G.fx.clear?.(); G.paint.clear();
-    const map = MAPS.find((m) => m.id === opts.mapId) || MAPS[0];
+    let map = MAPS.find((m) => m.id === opts.mapId) || MAPS[0];
+    // offline never plays an online-only stage (the menus don't offer one; a stray ?autostart / api call falls back)
+    if (!mapOfflineOk(map.id) && !DEV_STAGE) {
+      console.warn(`[inkwave] ${map.name} is online only — offline match on ${OFFLINE_MAPS[0].name} instead`);
+      this.menus?.toast?.(`${map.name} is online only`);
+      map = OFFLINE_MAPS[0];
+    }
+    if (opts.mode === 'boss' && !mapBossOk(map.id)) opts.mode = 'turf';
     if ((map.layout || map.id) !== this.layoutId) await this._buildWorld(map);
     const theme = mapTheme(map, opts.time);
     this.time = opts.time === 'dusk' ? 'dusk' : 'day';
@@ -573,7 +593,7 @@ class Game {
     const m = (this.match = G.match = new Match({
       attract: false, duration: opts.duration, difficulty: opts.difficulty, mode: opts.mode, weapon: this.profile.weapon || 'shooter',
       playerName: this.profile.name || 'Player', CharacterClass: this.CharacterClass, rig: this.rig, input: this.input,
-      autopilot: params.has('autopilot'), style: this.profile.style || null,
+      autopilot: params.has('autopilot'), style: this.profile.style || null, noBots: mapNoBots(map.id),   // (devstage: a solo walk)
     }));
     m.setup();
     await this._warmCharacters(m);

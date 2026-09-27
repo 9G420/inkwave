@@ -880,6 +880,8 @@ body.iw-dio-on .iw-xh, body.iw-dio-on .iw-mks, body.iw-dio-on .iw-map, body.iw-d
 .iw-btc__tag i { display: block; width: 1.25em; height: 1.25em; color: var(--gold); }
 .iw-btc__tag i svg { width: 100%; height: 100%; }
 @keyframes iw-btc-tag { from { opacity: 0; translate: calc(var(--u) * -6) 0; } }
+.iw-btc__tags { display: flex; align-items: center; gap: calc(var(--u) * .7); }
+.iw-btc__beta { font-size: calc(var(--u) * .8); rotate: 2deg; animation: iw-btc-tag .45s var(--spring) .22s backwards; }
 .iw-btc__name { font-size: calc(var(--u) * 6.6); line-height: 1; color: #fff; rotate: -3.5deg; white-space: nowrap; -webkit-text-stroke: .15em var(--k); text-shadow: 0 .09em 0 var(--k), 0 .16em .14em rgba(0, 0, 0, .35); }
 .iw-btc__name span { display: inline-block; animation: iw-btc-letter .42s var(--spring2) backwards; animation-delay: calc(.16s + var(--i) * 32ms); }
 @keyframes iw-btc-letter { 0% { opacity: 0; scale: 2.6; translate: 0 -.25em; rotate: 14deg; } 40% { opacity: 1; } }

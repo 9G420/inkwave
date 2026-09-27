@@ -451,7 +451,7 @@ export class BossHud {
         h('span', { class: 'iw-btc__splat b', html: splatSVG({ seed: 23, fill: 'var(--boss)', r: 56, arms: 9, drops: 5 }) })),
       h('div', { class: 'iw-btc__emb', html: bossEmblem() }),
       h('div', { class: 'iw-btc__txt' },
-        h('div', { class: 'iw-btc__tag' }, h('i', { html: GLYPHS.swords }), 'BOSS BATTLE'),
+        h('div', { class: 'iw-btc__tags' }, h('div', { class: 'iw-btc__tag' }, h('i', { html: GLYPHS.swords }), 'BOSS BATTLE'), h('span', { class: 'iw-beta iw-btc__beta' }, 'PUBLIC BETA')),
         h('div', { class: 'iw-btc__name iw-display' }, letters),
         h('div', { class: 'iw-btc__epi' }, BOSS_EPITHET.toUpperCase())));
     el.addEventListener('animationend', (e) => { if (e.target === el) el.remove(); });

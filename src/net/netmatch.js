@@ -21,7 +21,7 @@
 // shooter's client (what you see is what you hit) and applied by the victim's owner.
 import * as THREE from 'three';
 import { G, emit, on } from '../core/ctx.js';
-import { PLAYER, WEAPONS } from '../config.js';
+import { PLAYER, WEAPONS, mapNoBots } from '../config.js';
 import { BotBrain } from '../game/bots.js';
 import { Boss } from '../boss/boss.js';
 
@@ -73,6 +73,8 @@ export class NetMatch {
       this._setupActor(a);
     }
     for (const ev of FORWARD) this.unsubs.push(on(ev, (e) => this._onLocalEvent(ev, e)));
+    // humans-only stage: anyone who left while the match was loading (no NetMatch yet to hear it) is dropped now
+    if (mapNoBots(this.cfg.map)) for (const a of [...this.byNid.values()]) if (a.owner !== this.myId && !this.s._members.has(a.owner)) this._remove(a);
     this.unsubs.push(on('match:state', ({ state, match: m }) => { if (m === this.match && this.isHost) this._sendNow({ k: 'st', s: state, t: r2(m.time) }); }));
   }
 
@@ -620,10 +622,14 @@ export class NetMatch {
   sendEnd() { if (this.isHost) this._sendNow({ k: 'end' }); }
 
   // ---- players leaving: their squidkid carries on as a bot, run by the host -------------------------------------------
+  // (a humans-only stage — config noBots, Cargo Terminal — removes it instead: it vanishes in an ink burst on every
+  // screen; the clock and judge still move with the host)
   onLeave(id, hostChanged) {
     if (!this.match) return;
-    for (const a of this.byNid.values()) {
+    const drop = mapNoBots(this.cfg.map);
+    for (const a of [...this.byNid.values()]) {
       if (a.owner !== id) continue;
+      if (drop) { this._remove(a); continue; }
       a.owner = this.s.hostId;
       if (a.owner === this.myId) this._adopt(a);
       else { a.net.buf.length = 0; a.net.handoff = true; }   // same squidkid, new sender: glide onto its new path
@@ -631,6 +637,12 @@ export class NetMatch {
     if (hostChanged && this.isHost) { this.match.follower = false; this.clockT = 0; }
     // the boss moves with the host: the new host adopts it from what it was showing; everyone else glides onto its path
     if (hostChanged && this.match.boss) { if (this.isHost) this.match.boss.adopt(); else this.match.boss.handoff(); }
+  }
+
+  _remove(a) {
+    this.byNid.delete(a.nid);
+    this._stopLoops(a);
+    this.match.removeActor(a);
   }
 
   _adopt(a) {

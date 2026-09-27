@@ -14,7 +14,7 @@
 // Debug handle (G.net.mock): auto(on) · add({ name, team, weapon, style, ready }) → id · drop(id) · ready(id, v) ·
 // emote(id, name) · swap(id, { weapon, style }) · fill(n) · clear() · host(id) · startMatch() · endMatch() · lose(msg)
 import { G } from '../core/ctx.js';
-import { WEAPON_ORDER, MAPS, TEAM_PALETTES } from '../config.js';
+import { WEAPON_ORDER, MAPS, TEAM_PALETTES, mapNoBots, mapBossOk, bossFallbackMap, noBotsStartBlock } from '../config.js';
 import * as LOOK from '../game/character-style.js';
 
 const q = new URLSearchParams(typeof location !== 'undefined' ? location.search : '');
@@ -88,6 +88,8 @@ export class MockNet {
       palette: G.game && G.game.paletteIndex ? G.game.paletteIndex() : 0,
       players: [this._me(name, 0, true)], maxPlayers: 8,
     };
+    this._botsPref = true;
+    if (mapNoBots(this.lobby.map)) this.lobby.bots = false;
     this._setState('lobby');
     this._emit('lobby', { lobby: this.lobby });
     const n = this._fill ?? 0;
@@ -118,6 +120,7 @@ export class MockNet {
       map: pick(MAPS).id, time: rnd() < 0.4 ? 'dusk' : 'day', duration: rnd() < 0.3 ? 90 : 180, bots: rnd() < 0.8,
       difficulty: pick(['easy', 'normal', 'normal', 'hard']), palette: (rnd() * TEAM_PALETTES.length) | 0, players: [host], maxPlayers: 8,
     };
+    if (mapNoBots(this.lobby.map)) this.lobby.bots = false;   // (the stage rules, as a real host applies them)
     const others = this._fill ?? (2 + ((rnd() * 3) | 0));
     for (let i = 1; i < others; i++) this.lobby.players.push(this._bot({ team: this._teamFor(), ready: rnd() < 0.45 }));
     this.hostId = hostId;
@@ -156,21 +159,25 @@ export class MockNet {
 
   setSettings(o = {}) {
     if (!this.isHost || !this.lobby || this.state !== 'lobby') return;
-    const L = this.lobby;
+    const L = this.lobby, wasMap = L.map;
     if (o.map && MAPS.some((m) => m.id === o.map)) L.map = o.map;
     if (o.time === 'day' || o.time === 'dusk') L.time = o.time;
     if (o.duration) L.duration = +o.duration;
-    if (o.bots != null) L.bots = !!o.bots;
+    if (o.bots != null) this._botsPref = !!o.bots;
     if (o.difficulty) L.difficulty = o.difficulty;
     if (o.mode === 'turf' || o.mode === 'boss') L.mode = o.mode;   // Boss Battle lobby setting (UI testing)
     if (Number.isInteger(o.palette) && TEAM_PALETTES[o.palette]) L.palette = o.palette;
+    // stage rules, exactly as session.js applies them (no Boss Battle on a noBoss stage, no bots on a noBots one)
+    if (L.mode === 'boss' && !mapBossOk(L.map)) L.map = bossFallbackMap(wasMap);
+    L.bots = mapNoBots(L.map) ? false : (this._botsPref ?? L.bots);
     this._emit('lobby', { lobby: this.lobby });
   }
 
   canStart() {
     if (!this.isHost || !this.lobby || this.state !== 'lobby') return false;
-    return this.lobby.players.every((p) => p.host || p.ready);
+    return !this.startBlock() && this.lobby.players.every((p) => p.host || p.ready);
   }
+  startBlock() { return noBotsStartBlock(this.lobby); }
 
   start() {
     if (!this.canStart()) return;

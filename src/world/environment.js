@@ -4,7 +4,10 @@
 // ferris wheel, sailboats, buoys, gulls). All far scenery fades into the sky with a sky-matched aerial haze.
 //
 // const env = new Environment(renderer, scene, { bounds, theme: 'day'|'sunset'|'golden', shadowSize, footprint })
-//   footprint (optional): array of {minX,maxX,minZ,maxZ} rects = the deck slab's XZ outline (default [bounds]).
+//   footprint (optional): array of deck rects = the deck slab's XZ outline (default [bounds]). Each rect is either an
+//   axis-aligned {minX,maxX,minZ,maxZ} or an oriented rect {cx,cz,hx,hz,ax,az} (centre, half extents along its local
+//   axes, local x axis (ax,az) unit; local z = (−az,ax)) — slabs turned about Y (Cargo Terminal). Internally every rect
+//   carries both (orect()): axis-aligned ones keep their exact min/max and code paths, so those stages are unchanged.
 //   Used for pilings, water foam, under-deck shading and the analytic deck shadow on the water.
 //   setTheme(name) switches light/sky/sea in place; rebuildForArena(bounds, footprint) follows a stage change.
 //
@@ -21,7 +24,7 @@ import { G } from '../core/ctx.js';
 
 const WATER_Y = PLAYER.waterY; // -1.6
 const DEG = Math.PI / 180;
-const MAX_RECTS = 24;   // deck slabs (Halyard has 16: every pier/quay slab of both halves)
+const MAX_RECTS = 32;   // deck slabs (Halyard has 16: every pier/quay slab of both halves; Cargo Terminal 29)
 const MAX_WET = 12;     // marina: solids piercing the surface (hulls) or sunk below it
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -408,27 +411,39 @@ void main() {
 }
 `;
 
+// Deck / hull rects are oriented: uRects[i] = (centre x, centre z, half extent along local x, along local z),
+// uRectAx[i] = the local x axis (unit, world xz); local z = (−ax.y, ax.x). Axis-aligned slabs pass (1, 0), for which the
+// rotation below is exact (x·1 + z·0), so they shade exactly as the old min/max rects did.
 const GLSL_DECK = /* glsl */`
 uniform vec4 uRects[${MAX_RECTS}];
+uniform vec2 uRectAx[${MAX_RECTS}];
 uniform int uRectCount;
+// axis-aligned rect given as (minX, minZ, maxX, maxZ) — the arena bounds
 float sdRect(vec2 p, vec4 r) {
   vec2 c = (r.xy + r.zw) * 0.5; vec2 h = (r.zw - r.xy) * 0.5;
   vec2 q = abs(p - c) - h;
   return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
 }
+// oriented rect: r = (centre, half extents), a = local x axis
+float sdORect(vec2 p, vec4 r, vec2 a) {
+  vec2 d = p - r.xy;
+  vec2 q = abs(vec2(dot(d, a), dot(d, vec2(-a.y, a.x)))) - r.zw;
+  return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+}
 float sdDeck(vec2 p) {
   float d = 1e5;
-  for (int i = 0; i < ${MAX_RECTS}; i++) { if (i >= uRectCount) break; d = min(d, sdRect(p, uRects[i])); }
+  for (int i = 0; i < ${MAX_RECTS}; i++) { if (i >= uRectCount) break; d = min(d, sdORect(p, uRects[i], uRectAx[i])); }
   return d;
 }
 #ifdef MARINA
 uniform vec4 uWet[${MAX_WET}];
+uniform vec2 uWetAx[${MAX_WET}];
 uniform int uWetCount;
 uniform vec4 uArena;        // arena bounds (minX, minZ, maxX, maxZ): the harbour basin around it is sheltered
 float basinK(vec2 p) { return smoothstep(60.0, 210.0, sdRect(p, uArena)); }   // 0 in the basin → 1 open sea
 float sdWet(vec2 p) {
   float d = 1e5;
-  for (int i = 0; i < ${MAX_WET}; i++) { if (i >= uWetCount) break; d = min(d, sdRect(p, uWet[i])); }
+  for (int i = 0; i < ${MAX_WET}; i++) { if (i >= uWetCount) break; d = min(d, sdORect(p, uWet[i], uWetAx[i])); }
   return d;
 }
 #endif
@@ -466,23 +481,27 @@ uniform vec4 uCloudParams;
 uniform vec3 uChannelCol;
 uniform vec3 uShadeCol;
 uniform vec4 uMarinaK;     // x calm (wave-normal scale hugging faces), y face-ripple strength, z reflection distortion (m)
-// distance (m) + outward unit gradient to a rect / the nearest rect of a set
-vec3 sdRectG(vec2 p, vec4 r) {
-  vec2 c = (r.xy + r.zw) * 0.5, h = (r.zw - r.xy) * 0.5;
-  vec2 d = p - c;
-  vec2 s = vec2(d.x < 0.0 ? -1.0 : 1.0, d.y < 0.0 ? -1.0 : 1.0);
-  vec2 q = abs(d) - h;
-  if (max(q.x, q.y) > 0.0) { vec2 m = max(q, 0.0); float l = max(length(m), 1e-4); return vec3(l, s * m / l); }
-  return q.x > q.y ? vec3(q.x, s.x, 0.0) : vec3(q.y, 0.0, s.y);
+// distance (m) + outward unit gradient (world xz) to an oriented rect / the nearest rect of a set. The gradient is
+// found in the rect's frame and rotated back (g.x·a + g.y·(−a.y, a.x)); exact for axis-aligned rects (a = (1, 0)).
+vec3 sdORectG(vec2 p, vec4 r, vec2 a) {
+  vec2 b = vec2(-a.y, a.x);
+  vec2 d = p - r.xy;
+  vec2 l = vec2(dot(d, a), dot(d, b));
+  vec2 s = vec2(l.x < 0.0 ? -1.0 : 1.0, l.y < 0.0 ? -1.0 : 1.0);
+  vec2 q = abs(l) - r.zw;
+  vec3 o;
+  if (max(q.x, q.y) > 0.0) { vec2 m = max(q, 0.0); float len = max(length(m), 1e-4); o = vec3(len, s * m / len); }
+  else o = q.x > q.y ? vec3(q.x, s.x, 0.0) : vec3(q.y, 0.0, s.y);
+  return vec3(o.x, o.y * a + o.z * b);
 }
 vec3 sdDeckG(vec2 p) {
   vec3 b = vec3(1e5, 0.0, 1.0);
-  for (int i = 0; i < ${MAX_RECTS}; i++) { if (i >= uRectCount) break; vec3 r = sdRectG(p, uRects[i]); if (r.x < b.x) b = r; }
+  for (int i = 0; i < ${MAX_RECTS}; i++) { if (i >= uRectCount) break; vec3 r = sdORectG(p, uRects[i], uRectAx[i]); if (r.x < b.x) b = r; }
   return b;
 }
 vec3 sdWetG(vec2 p) {
   vec3 b = vec3(1e5, 0.0, 1.0);
-  for (int i = 0; i < ${MAX_WET}; i++) { if (i >= uWetCount) break; vec3 r = sdRectG(p, uWet[i]); if (r.x < b.x) b = r; }
+  for (int i = 0; i < ${MAX_WET}; i++) { if (i >= uWetCount) break; vec3 r = sdORectG(p, uWet[i], uWetAx[i]); if (r.x < b.x) b = r; }
   return b;
 }
 vec3 skyRefl(vec3 R) {
@@ -1085,6 +1104,45 @@ function fbm(x, y, oct = 4) { let s = 0, a = 0.5, n = 0; for (let i = 0; i < oct
 const smooth = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
 const polar = (deg, d) => [Math.cos(deg * DEG) * d, Math.sin(deg * DEG) * d];
 
+// ---- oriented deck rects (footprint / marina deck + wet sets) -------------------------------------------------
+// { cx, cz, hx, hz, ax, az, minX, maxX, minZ, maxZ, aligned }: centre, half extents along the local axes, local x axis
+// (ax, az) (unit), local z = (−az, ax), plus the XZ AABB. `aligned` rects keep their exact min/max and take the exact
+// axis-aligned code paths below (so axis-aligned stages build exactly what they always did). Accepts a legacy
+// {minX..maxZ} rect or an oriented {cx,cz,hx,hz,ax,az} one; extra fields (y0, y1 …) are kept.
+function orect(r) {
+  if (r.hx === undefined) return { ...r, cx: (r.minX + r.maxX) / 2, cz: (r.minZ + r.maxZ) / 2, hx: (r.maxX - r.minX) / 2, hz: (r.maxZ - r.minZ) / 2, ax: 1, az: 0, aligned: true };
+  let ax = r.ax ?? 1, az = r.az ?? 0, hx = r.hx, hz = r.hz;
+  const l = Math.hypot(ax, az) || 1; ax /= l; az /= l;
+  // quarter turns are axis-aligned rects (swap the extents for 90° / 270°)
+  if (Math.abs(az) < 1e-7) { ax = 1; az = 0; } else if (Math.abs(ax) < 1e-7) { ax = 1; az = 0; [hx, hz] = [hz, hx]; }
+  const aligned = ax === 1 && az === 0;
+  const ex = Math.abs(ax) * hx + Math.abs(az) * hz, ez = Math.abs(az) * hx + Math.abs(ax) * hz;
+  return { ...r, hx, hz, ax, az, aligned, minX: r.cx - ex, maxX: r.cx + ex, minZ: r.cz - ez, maxZ: r.cz + ez };
+}
+// point strictly inside rect r grown by pad
+function inRect(r, x, z, pad = 0) {
+  if (r.aligned) return x > r.minX - pad && x < r.maxX + pad && z > r.minZ - pad && z < r.maxZ + pad;
+  const dx = x - r.cx, dz = z - r.cz;
+  return Math.abs(dx * r.ax + dz * r.az) < r.hx + pad && Math.abs(dz * r.ax - dx * r.az) < r.hz + pad;
+}
+// world (x, z) of the rect-local point (lx, lz)
+const rectPt = (r, lx, lz) => [r.cx + lx * r.ax - lz * r.az, r.cz + lx * r.az + lz * r.ax];
+// the four edges, counter-clockwise from the (−x, −z) corner, with outward unit normals: aligned rects keep the exact
+// min/max corners and (0, ±1) / (±1, 0) normals (the order the dock builder always used)
+function rectEdges(r) {
+  if (r.aligned) {
+    return [
+      { ax: r.minX, az: r.minZ, bx: r.maxX, bz: r.minZ, nx: 0, nz: -1 },
+      { ax: r.maxX, az: r.minZ, bx: r.maxX, bz: r.maxZ, nx: 1, nz: 0 },
+      { ax: r.maxX, az: r.maxZ, bx: r.minX, bz: r.maxZ, nx: 0, nz: 1 },
+      { ax: r.minX, az: r.maxZ, bx: r.minX, bz: r.minZ, nx: -1, nz: 0 },
+    ];
+  }
+  const c = [rectPt(r, -r.hx, -r.hz), rectPt(r, r.hx, -r.hz), rectPt(r, r.hx, r.hz), rectPt(r, -r.hx, r.hz)];
+  const n = [[r.az, -r.ax], [r.ax, r.az], [-r.az, r.ax], [-r.ax, -r.az]];
+  return c.map((p, i) => ({ ax: p[0], az: p[1], bx: c[(i + 1) & 3][0], bz: c[(i + 1) & 3][1], nx: n[i][0] + 0, nz: n[i][1] + 0 }));
+}
+
 const _m4 = new THREE.Matrix4(), _q = new THREE.Quaternion(), _e = new THREE.Euler(), _v = new THREE.Vector3(), _s = new THREE.Vector3();
 // planar-reflection scratch
 const _rv = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
@@ -1351,7 +1409,7 @@ export class Environment {
     this.scene = scene;
     const b = opts.bounds || { minX: -25, maxX: 25, minZ: -44, maxZ: 44 };
     this.bounds = { minX: b.minX, maxX: b.maxX, minZ: b.minZ, maxZ: b.maxZ };
-    this.footprint = (opts.footprint && opts.footprint.length ? opts.footprint : [this.bounds]).slice(0, MAX_RECTS).map((r) => ({ ...r }));
+    this.footprint = (opts.footprint && opts.footprint.length ? opts.footprint : [this.bounds]).slice(0, MAX_RECTS).map(orect);
     this.shadowSize = opts.shadowSize || 4096;
     this.waterY = WATER_Y;
     this.time = 0;
@@ -1391,12 +1449,14 @@ export class Environment {
       uGlowParams: { value: new THREE.Vector4() }, uHaze: { value: new THREE.Vector4() }, uNight: { value: 0 },
       uSunDisk: C(), uSunCos: { value: 0.9998 }, uCloudLit: C(), uCloudShade: C(), uCloudParams: { value: new THREE.Vector4() },
       uRects: { value: Array.from({ length: MAX_RECTS }, () => new THREE.Vector4()) }, uRectCount: { value: 0 },
+      uRectAx: { value: Array.from({ length: MAX_RECTS }, () => new THREE.Vector2(1, 0)) },
       uWaveTex: { value: null }, uFoamTex: { value: null }, uFoamRect: { value: new THREE.Vector4() },
       uSeaDeep: C(), uSeaShallow: C(), uSeaCrest: C(), uFoamColor: C(), uSunLight: C(), uSeaAmbient: C(),
       uSunSpec: { value: 1 }, uWaveStrength: { value: 1 },
       uCloudTex: { value: null },
       // marina water (theme.marina)
       uWet: { value: Array.from({ length: MAX_WET }, () => new THREE.Vector4()) }, uWetCount: { value: 0 }, uArena: { value: new THREE.Vector4() },
+      uWetAx: { value: Array.from({ length: MAX_WET }, () => new THREE.Vector2(1, 0)) },
       uReflTex: { value: null }, uReflMat: { value: new THREE.Matrix4() }, uReflOn: { value: 0 },
       uFarCube: { value: null }, uFarOn: { value: 0 },
       uChannelCol: C(), uShadeCol: C(), uMarinaK: { value: new THREE.Vector4(1, 1, 0.3, 0) },
@@ -1405,10 +1465,16 @@ export class Environment {
     this._writeRects();
   }
 
-  _writeRects() {
-    const u = this.U.uRects.value;
-    this.footprint.forEach((r, i) => u[i].set(r.minX, r.minZ, r.maxX, r.maxZ));
-    this.U.uRectCount.value = this.footprint.length;
+  // deck rects → uRects (centre, half extents) + uRectAx (local x axis); marina hulls → uWet + uWetAx
+  _writeRects(rects = this.footprint) {
+    const U = this.U;
+    rects.forEach((r, i) => { U.uRects.value[i].set(r.cx, r.cz, r.hx, r.hz); U.uRectAx.value[i].set(r.ax, r.az); });
+    U.uRectCount.value = rects.length;
+  }
+  _writeWet(rects) {
+    const U = this.U;
+    rects.forEach((r, i) => { U.uWet.value[i].set(r.cx, r.cz, r.hx, r.hz); U.uWetAx.value[i].set(r.ax, r.az); });
+    U.uWetCount.value = rects.length;
   }
 
   // ------------------------------------------------------------------ lights
@@ -1712,7 +1778,7 @@ export class Environment {
     if (L) for (const b of L.blocks) {
       if (!b.solid || b.hidden || !b.aligned || b.grate) continue;
       const lo = b.aabbMin, hi = b.aabbMax;
-      const r = { minX: lo.x, maxX: hi.x, minZ: lo.z, maxZ: hi.z, y0: lo.y, y1: hi.y };
+      const r = orect({ minX: lo.x, maxX: hi.x, minZ: lo.z, maxZ: hi.z, y0: lo.y, y1: hi.y });
       if (lo.y < WATER_Y - 0.02 && hi.y > -30) wet.push(r);          // pierces the surface / sunk below it
       else if (lo.y >= WATER_Y - 0.02 && lo.y < WATER_Y + 0.9) decks.push(r);
     }
@@ -1735,10 +1801,8 @@ export class Environment {
     if (!on) { this._marinaData = null; U.uWetCount.value = 0; U.uReflOn.value = 0; this._writeRects(); return; }
     const M = (this._marinaData = this._marinaSets());
     U.uArena.value.set(this.bounds.minX, this.bounds.minZ, this.bounds.maxX, this.bounds.maxZ);
-    M.decks.forEach((r, i) => U.uRects.value[i].set(r.minX, r.minZ, r.maxX, r.maxZ));
-    U.uRectCount.value = M.decks.length;
-    M.wet.forEach((r, i) => U.uWet.value[i].set(r.minX, r.minZ, r.maxX, r.maxZ));
-    U.uWetCount.value = M.wet.length;
+    this._writeRects(M.decks);
+    this._writeWet(M.wet);
     this._buildFoamField([...(this._foamShapes || []), ...this._waterContours(M.wet)]);
     this._buildMarinaFx(M);
   }
@@ -1919,19 +1983,13 @@ export class Environment {
   }
 
   // ------------------------------------------------------------------ dock: pilings, fenders, ladders, moored boats
-  _insideFootprint(x, z) { return this.footprint.some((r) => x > r.minX && x < r.maxX && z > r.minZ && z < r.maxZ); }
+  _insideFootprint(x, z) { return this.footprint.some((r) => inRect(r, x, z)); }
   _insideBounds(x, z) { const b = this.bounds; return x > b.minX + 0.01 && x < b.maxX - 0.01 && z > b.minZ + 0.01 && z < b.maxZ - 0.01; }
 
   _boundaryRuns() {
     const runs = [];
     for (const r of this.footprint) {
-      const edges = [
-        { ax: r.minX, az: r.minZ, bx: r.maxX, bz: r.minZ, nx: 0, nz: -1 },
-        { ax: r.maxX, az: r.minZ, bx: r.maxX, bz: r.maxZ, nx: 1, nz: 0 },
-        { ax: r.maxX, az: r.maxZ, bx: r.minX, bz: r.maxZ, nx: 0, nz: 1 },
-        { ax: r.minX, az: r.maxZ, bx: r.minX, bz: r.minZ, nx: -1, nz: 0 },
-      ];
-      for (const e of edges) {
+      for (const e of rectEdges(r)) {
         const len = Math.hypot(e.bx - e.ax, e.bz - e.az);
         const step = 0.25;
         let start = -1;
@@ -1974,15 +2032,23 @@ export class Environment {
         foamShapes.push({ ax: x, az: z, bx: x, bz: z, r: rad });
       }
     }
-    // interior grid under the slab (seen from the water)
+    // interior grid under the slab (seen from the water), on the slab's own (possibly turned) grid
     for (const r of this.footprint) {
-      for (let x = r.minX + 3.5; x <= r.maxX - 3.5; x += 7) for (let z = r.minZ + 3.5; z <= r.maxZ - 3.5; z += 7) {
-        pilings.push([x, z, 0.3, -1.2]);
+      if (r.aligned) {
+        for (let x = r.minX + 3.5; x <= r.maxX - 3.5; x += 7) for (let z = r.minZ + 3.5; z <= r.maxZ - 3.5; z += 7) {
+          pilings.push([x, z, 0.3, -1.2]);
+        }
+      } else {
+        for (let u = -r.hx + 3.5; u <= r.hx - 3.5 + 1e-6; u += 7) for (let v = -r.hz + 3.5; v <= r.hz - 3.5 + 1e-6; v += 7) {
+          const [x, z] = rectPt(r, u, v);
+          pilings.push([x, z, 0.3, -1.2]);
+        }
       }
     }
 
     // ---- moored boats + dolphins (outside the bounds) ----
-    const boatsSpec = marina ? [] : [
+    // (a stage that dresses its own water can switch these off: layout.envBoats === false — Cargo Terminal's ships)
+    const boatsSpec = marina || G.level?.layout?.envBoats === false ? [] : [
       { kind: 'fishing', x: b.maxX + 3.25, z: b.minZ + (b.maxZ - b.minZ) * 0.77, yaw: 0 },
       { kind: 'launch', x: b.minX - 2.85, z: b.minZ + (b.maxZ - b.minZ) * 0.2, yaw: Math.PI },
       { kind: 'row', x: b.minX - 1.75, z: b.minZ + (b.maxZ - b.minZ) * 0.86, yaw: 0.12 },
@@ -2047,7 +2113,7 @@ export class Environment {
       // grab rail loop over the top edge
       dockParts.push(tube([[x + nx * off + tx * 0.28, -0.1, z + nz * off + tz * 0.28], [x + nx * 0.02 + tx * 0.28, 0.02, z + nz * 0.02 + tz * 0.28]], 0.035, '#aab3bb'));
     };
-    if (!marina) {
+    if (!marina && boatsSpec.length) {
       ladderAt(b.maxX, boatsSpec[0].z - 5.5, 1, 0);
       ladderAt(b.minX, boatsSpec[1].z + 4.5, -1, 0);
     }
@@ -2679,8 +2745,10 @@ export class Environment {
     let d = 1e5;
     const M = this._marinaData;
     for (const set of M ? [M.decks, M.wet] : [this.footprint]) for (const r of set) {
+      // (turned rects: the distance in the rect's own frame, matching sdORect in the sea shaders)
       const cx = (r.minX + r.maxX) / 2, cz = (r.minZ + r.maxZ) / 2, hx = (r.maxX - r.minX) / 2, hz = (r.maxZ - r.minZ) / 2;
-      const qx = Math.abs(x - cx) - hx, qz = Math.abs(z - cz) - hz;
+      const qx = r.aligned ? Math.abs(x - cx) - hx : Math.abs((x - r.cx) * r.ax + (z - r.cz) * r.az) - r.hx;
+      const qz = r.aligned ? Math.abs(z - cz) - hz : Math.abs((z - r.cz) * r.ax - (x - r.cx) * r.az) - r.hz;
       const dd = Math.hypot(Math.max(qx, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qz), 0);
       d = Math.min(d, dd);
     }
@@ -2713,7 +2781,7 @@ export class Environment {
   rebuildForArena(bounds, rects) {
     this._marina = this._stageMarina();
     this.bounds = { ...bounds };
-    this.footprint = (rects && rects.length ? rects : [this.bounds]).slice(0, MAX_RECTS).map((r) => ({ ...r }));
+    this.footprint = (rects && rects.length ? rects : [this.bounds]).slice(0, MAX_RECTS).map(orect);
     this._writeRects();
     this._rebuildDock();
     this._applyMarina();
@@ -2735,7 +2803,7 @@ export class Environment {
 
   // Replace the deck outline (array of {minX,maxX,minZ,maxZ}) → foam/under-deck shading follow. Pilings are built once.
   setFootprint(rects) {
-    this.footprint = rects.slice(0, MAX_RECTS).map((r) => ({ ...r }));
+    this.footprint = rects.slice(0, MAX_RECTS).map(orect);
     this._writeRects();
   }
 

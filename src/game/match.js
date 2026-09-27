@@ -8,7 +8,7 @@ import { randomStyle } from './character-style.js';
 import { PlayerController } from './player.js';
 import { BossMode, BOSS_MODE } from '../boss/bossMode.js';
 
-const _v = new THREE.Vector3();
+const _v = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
 
 export class Match {
   constructor(opts) {
@@ -49,11 +49,15 @@ export class Match {
     const names = shuffle([...BOT_NAMES]);
     let ni = 0;
     const boss = this.mode === 'boss';
+    // humans-only stage (config noBots) offline: a match is just you (the ?devstage walk), the attract backdrop nobody
+    // (o.mannequins: idle, brainless kids for the render audits)
+    const noBots = !!o.noBots;
     for (let team = 0; team < (boss ? 1 : 2); team++) {
       const weapons = pickTeam(team === 0 && !this.attract ? o.weapon : null);
       if (boss) weapons.push(...pickTeam(null));   // the whole squad on one side: 8 kids, every weapon kind
       for (let s = 0; s < (boss ? BOSS_MODE.squad : MATCH.teamSize); s++) {
         const isLocal = team === 0 && s === 0 && !this.attract;
+        if (noBots && !isLocal && !(this.attract && o.mannequins)) continue;
         const a = new Actor({
           team, slot: s, weapon: weapons[s], isLocal, isBot: !isLocal,
           name: isLocal ? (o.playerName || 'You') : names[ni++ % names.length],
@@ -61,7 +65,7 @@ export class Match {
           style: isLocal && o.style ? { ...o.style } : randomStyle(), CharacterClass,
         });
         G.scene.add(a.character.root);
-        if (!isLocal || o.autopilot) a.bot = new BotBrain(a, o.difficulty);
+        if ((!isLocal || o.autopilot) && !(noBots && !isLocal)) a.bot = new BotBrain(a, o.difficulty);
         this.actors.push(a);
       }
     }
@@ -127,6 +131,24 @@ export class Match {
     this.unsubs?.forEach((u) => u());
     G.actors = [];
     G.local = null;
+  }
+
+  // Online, humans-only stage (config noBots): a player left, and nobody takes over their squidkid — it bursts into its
+  // own ink and is gone. HUD squads, the minimap, specials / weapons and the judge all read this.actors (G.actors is the
+  // same array), so dropping it here is all they need.
+  removeActor(a) {
+    const i = this.actors.indexOf(a);
+    if (i < 0) return;
+    if (a.alive && a.character.root.visible) {
+      _v.copy(a.pos); _v.y += 0.6;
+      G.fx?.splatted(_v, a.color);
+      G.fx?.burst?.(_v, _up, a.color, { count: 18, speed: 5, size: 0.1 });
+      G.audio?.play?.('splat_big', { pos: a.pos, volume: 0.6 });
+    }
+    this.actors.splice(i, 1);
+    if (G.rig?.spectate?.actor === a) G.rig.spectate.actor = null;   // a death cam watching them looks on at the spot
+    G.scene.remove(a.character.root); a.weaponRunner.reset(); a.character.dispose?.();
+    emit('actor:removed', { actor: a });
   }
 
   _onSplatted({ victim, attacker, cause }) {
