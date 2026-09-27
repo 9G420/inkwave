@@ -1,4 +1,4 @@
-// Stage-select art (menus stream): one hero shot per stage × time of day, rendered from the REAL game — attract mode
+// Stage-select art: one hero shot per stage × time of day, rendered from the REAL game — attract mode
 // booted on the stage, every actor hidden, ink / projectiles / FX cleared, a static cinematic camera, a fixed world
 // clock — then captured straight from the WebGL canvas (no DOM UI) at 2× supersampling and saved as WebP.
 //

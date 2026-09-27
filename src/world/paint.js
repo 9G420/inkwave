@@ -25,6 +25,7 @@
 // kind: 'shot' 'line' 'blast' 'bomb' 'trail' 'drop' 'roll' 'speck' (inferred from radius/stretch when omitted;
 //       'roll' needs `stretch` = the roll direction and paints a straight-edged band segment instead of a blob)
 import * as THREE from 'three';
+import { G } from '../core/ctx.js';
 
 const MAX_QUADS = 6000;
 const RIP_N = 24;
@@ -390,6 +391,12 @@ export class PaintSystem {
   // center: Vector3, radius (m), team 0|1, opts: { stretch: Vector3 dir, stretchAmt, seed, kind, instant, cosmetic }
   // Returns the area (m²) newly claimed by `team` (for turf points / special gauge).
   splat(center, radius, team, opts = {}) {
+    // online: other players' ghost rounds never paint (their owner's splats arrive instead); yours are recorded
+    const nm = G.netm;
+    if (nm && !opts.cosmetic) {
+      if (nm.mute > 0) return 0;
+      if (!nm.applying) { if (opts.seed === undefined) opts.seed = Math.random(); nm.recSplat(center, radius, team, opts); }
+    }
     const seed = opts.seed ?? Math.random();
     const cosmetic = !!opts.cosmetic;
     const st = opts.stretch;

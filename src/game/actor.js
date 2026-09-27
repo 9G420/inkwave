@@ -146,6 +146,7 @@ export class Actor {
     const p = _v.set(pad.x + Math.cos(a) * 1.1, pad.y + 4.5, pad.z + Math.sin(a) * 1.1);
     const yaw = this.team === 0 ? 0 : Math.PI;
     this.spawnAt(p, yaw);
+    this.netTp = (this.netTp || 0) + 1;     // online: a genuine teleport — proxies snap instead of gliding across the map
     this.grounded = false;
     this.vel.set(0, -4, 0);
     this.character.trigger('spawn');
@@ -822,7 +823,9 @@ export class Actor {
   _finishFrame(dt) {
     const a = this.anim;
     const isSquid = this.form === 'squid';
-    this._face(dt, isSquid);
+    // online proxies arrive already facing the owner's way (net/netmatch.js applyRemote)
+    if (this.remote) a.turnRate = this.netTurnRate || 0;
+    else this._face(dt, isSquid);
     const hs = Math.hypot(this.vel.x, this.vel.z);
     const cy = Math.cos(this.yaw), sy = Math.sin(this.yaw);
     a.speed = hs;
@@ -846,7 +849,8 @@ export class Actor {
     a.hp = clamp(this.hp / PLAYER.hp, 0, 1);
     a.inEnemyInk = !!this.onEnemy;
     a.surface = this.grounded ? this.groundTeam : 0;
-    // visual step smoothing (critically damped, ~0.12 s)
+    // visual step smoothing (critically damped, ~0.12 s) — proxies already carry the owner's smoothed height
+    if (this.remote) { this.smoothY = 0; this.smoothYV = 0; }
     const w = 24;
     const acc = -w * w * this.smoothY - 2 * w * this.smoothYV;
     this.smoothYV += acc * dt; this.smoothY += this.smoothYV * dt;
